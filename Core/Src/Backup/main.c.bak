@@ -1,0 +1,233 @@
+#include "main.h"
+#include "gpio.h"
+
+#define MOTOR_FORWARD   1
+#define MOTOR_BACKWARD -1
+#define MOTOR_STOP      0
+
+typedef struct
+{
+  GPIO_TypeDef *lpwm_port;
+  uint16_t lpwm_pin;
+
+  GPIO_TypeDef *rpwm_port;
+  uint16_t rpwm_pin;
+
+  GPIO_TypeDef *en_port;
+  uint16_t en_pin;
+
+} MotorGPIO_t;
+
+/*
+  Motor 1:
+    LPWM PA8
+    RPWM PA9
+    EN   PC13
+
+  Motor 2:
+    LPWM PA10
+    RPWM PA11
+    EN   PC14
+
+  Motor 3:
+    LPWM PA2
+    RPWM PA3
+    EN   PC15
+
+  Motor 4:
+    LPWM PB8
+    RPWM PB9
+    EN   PB12
+*/
+
+MotorGPIO_t motors[4] =
+{
+  {GPIOA, GPIO_PIN_8,  GPIOA, GPIO_PIN_9,  GPIOC, GPIO_PIN_13},
+  {GPIOA, GPIO_PIN_10, GPIOA, GPIO_PIN_11, GPIOC, GPIO_PIN_14},
+  {GPIOA, GPIO_PIN_2,  GPIOA, GPIO_PIN_3,  GPIOC, GPIO_PIN_15},
+  {GPIOB, GPIO_PIN_8,  GPIOB, GPIO_PIN_9,  GPIOB, GPIO_PIN_12}
+};
+
+void SystemClock_Config(void);
+void Motors_GPIO_Init(void);
+void Motor_SetDirection(MotorGPIO_t *motor, int direction);
+void Motors_SetDirectionAll(int direction);
+void Motors_StopAll(void);
+void Error_Handler(void);
+
+void Motors_GPIO_Init(void)
+{
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
+
+  __HAL_RCC_GPIOA_CLK_ENABLE();
+  __HAL_RCC_GPIOB_CLK_ENABLE();
+  __HAL_RCC_GPIOC_CLK_ENABLE();
+
+  /*
+    GPIOA:
+    PA2, PA3, PA8, PA9, PA10, PA11
+  */
+  GPIO_InitStruct.Pin = GPIO_PIN_2 | GPIO_PIN_3 |
+                        GPIO_PIN_8 | GPIO_PIN_9 |
+                        GPIO_PIN_10 | GPIO_PIN_11;
+
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+  /*
+    GPIOB:
+    PB8, PB9, PB12
+  */
+  GPIO_InitStruct.Pin = GPIO_PIN_8 | GPIO_PIN_9 | GPIO_PIN_12;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+  /*
+    GPIOC:
+    PC13, PC14, PC15
+  */
+  GPIO_InitStruct.Pin = GPIO_PIN_13 | GPIO_PIN_14 | GPIO_PIN_15;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
+
+  /*
+    Enable tat ca BTS7960
+  */
+  for (int i = 0; i < 4; i++)
+  {
+    HAL_GPIO_WritePin(motors[i].en_port, motors[i].en_pin, GPIO_PIN_SET);
+  }
+
+  Motors_StopAll();
+}
+
+void Motor_SetDirection(MotorGPIO_t *motor, int direction)
+{
+  /*
+    Dam bao driver luon duoc enable
+  */
+  HAL_GPIO_WritePin(motor->en_port, motor->en_pin, GPIO_PIN_SET);
+
+  if (direction == MOTOR_FORWARD)
+  {
+    HAL_GPIO_WritePin(motor->lpwm_port, motor->lpwm_pin, GPIO_PIN_SET);
+    HAL_GPIO_WritePin(motor->rpwm_port, motor->rpwm_pin, GPIO_PIN_RESET);
+  }
+  else if (direction == MOTOR_BACKWARD)
+  {
+    HAL_GPIO_WritePin(motor->lpwm_port, motor->lpwm_pin, GPIO_PIN_RESET);
+    HAL_GPIO_WritePin(motor->rpwm_port, motor->rpwm_pin, GPIO_PIN_SET);
+  }
+  else
+  {
+    HAL_GPIO_WritePin(motor->lpwm_port, motor->lpwm_pin, GPIO_PIN_RESET);
+    HAL_GPIO_WritePin(motor->rpwm_port, motor->rpwm_pin, GPIO_PIN_RESET);
+  }
+}
+
+void Motors_SetDirectionAll(int direction)
+{
+  for (int i = 0; i < 4; i++)
+  {
+    Motor_SetDirection(&motors[i], direction);
+  }
+}
+
+void Motors_StopAll(void)
+{
+  for (int i = 0; i < 4; i++)
+  {
+    Motor_SetDirection(&motors[i], MOTOR_STOP);
+  }
+}
+
+int main(void)
+{
+  HAL_Init();
+
+  SystemClock_Config();
+
+  MX_GPIO_Init();
+
+  Motors_GPIO_Init();
+
+  while (1)
+  {
+    /*
+      Ca 4 motor quay thuan 3 giay
+    */
+    Motors_SetDirectionAll(MOTOR_FORWARD);
+    HAL_Delay(3000);
+
+    /*
+      Dung 1 giay
+    */
+    Motors_StopAll();
+    HAL_Delay(1000);
+
+    /*
+      Ca 4 motor quay nguoc 3 giay
+    */
+    Motors_SetDirectionAll(MOTOR_BACKWARD);
+    HAL_Delay(3000);
+
+    /*
+      Dung 1 giay
+    */
+    Motors_StopAll();
+    HAL_Delay(1000);
+  }
+}
+
+void SystemClock_Config(void)
+{
+  RCC_OscInitTypeDef RCC_OscInitStruct = {0};
+  RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
+
+  __HAL_RCC_PWR_CLK_ENABLE();
+  __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE2);
+
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
+  RCC_OscInitStruct.HSIState = RCC_HSI_ON;
+  RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
+  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_NONE;
+
+  if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_SYSCLK
+                              | RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2;
+
+  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_HSI;
+  RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
+  RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV1;
+  RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
+
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_0) != HAL_OK)
+  {
+    Error_Handler();
+  }
+}
+
+void Error_Handler(void)
+{
+  __disable_irq();
+
+  while (1)
+  {
+  }
+}
+
+#ifdef USE_FULL_ASSERT
+void assert_failed(uint8_t *file, uint32_t line)
+{
+}
+#endif
