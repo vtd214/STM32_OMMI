@@ -46,7 +46,7 @@ typedef struct
   int64_t encoder_total_count;
 
   float speed_mps;
-
+  int encoder_sign;
   int direction;
 
 } Motor_t;
@@ -122,8 +122,9 @@ Motor_t motors[WHEEL_COUNT] =
     GPIOC, GPIO_PIN_13,
     &htim2,
     0, 0, 0,
-    0.0f,
-    MOTOR_STOP
+	0.0f,
+	-1,
+	MOTOR_STOP
   },
 
   {
@@ -133,8 +134,9 @@ Motor_t motors[WHEEL_COUNT] =
     GPIOC, GPIO_PIN_14,
     &htim3,
     0, 0, 0,
-    0.0f,
-    MOTOR_STOP
+	0.0f,
+	-1,
+	MOTOR_STOP
   },
 
   {
@@ -144,8 +146,9 @@ Motor_t motors[WHEEL_COUNT] =
     GPIOC, GPIO_PIN_15,
     &htim4,
     0, 0, 0,
-    0.0f,
-    MOTOR_STOP
+	0.0f,
+	-1,
+	MOTOR_STOP
   },
 
   {
@@ -155,8 +158,9 @@ Motor_t motors[WHEEL_COUNT] =
     GPIOB, GPIO_PIN_12,
     &htim5,
     0, 0, 0,
-    0.0f,
-    MOTOR_STOP
+	0.0f,
+	-1,
+	MOTOR_STOP
   }
 };
 
@@ -372,6 +376,12 @@ int32_t Encoder_ReadDelta(Motor_t *motor)
   {
     delta += (int64_t)period;
   }
+
+  /*
+    Dao dau encoder neu can.
+    Neu xe chay tien ma encoder ra am, encoder_sign = -1.
+  */
+  delta = delta * motor->encoder_sign;
 
   motor->encoder_last_count = now_count;
   motor->encoder_delta = (int32_t)delta;
