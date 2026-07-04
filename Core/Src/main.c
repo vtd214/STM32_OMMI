@@ -2,20 +2,17 @@
 /**
   ******************************************************************************
   * @file           : main.c
-  * @brief          : Main program body
-  ******************************************************************************
-  * @attention
+  * @brief          : GPIO 4 Motor + Encoder Test for STM32F401
   *
-  * Copyright (c) 2026 STMicroelectronics.
-  * All rights reserved.
-  *
-  * This software is licensed under terms that can be found in the LICENSE file
-  * in the root directory of this software component.
-  * If no LICENSE file comes with this software, it is provided AS-IS.
-  *
+  * Motor mapping:
+  *   Motor 1 = Front Left  = Banh truoc trai
+  *   Motor 2 = Front Right = Banh truoc phai
+  *   Motor 3 = Rear Left   = Banh sau trai
+  *   Motor 4 = Rear Right  = Banh sau phai
   ******************************************************************************
   */
 /* USER CODE END Header */
+
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 #include "tim.h"
@@ -23,16 +20,61 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include <stdint.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
 
+typedef struct
+{
+  const char *name;
+
+  GPIO_TypeDef *lpwm_port;
+  uint16_t lpwm_pin;
+
+  GPIO_TypeDef *rpwm_port;
+  uint16_t rpwm_pin;
+
+  GPIO_TypeDef *en_port;
+  uint16_t en_pin;
+
+  TIM_HandleTypeDef *encoder_htim;
+
+  uint32_t encoder_last_count;
+  int32_t encoder_delta;
+  int64_t encoder_total_count;
+
+  float speed_mps;
+
+  int direction;
+
+} Motor_t;
+
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+
+#define MOTOR_FORWARD    1
+#define MOTOR_BACKWARD  -1
+#define MOTOR_STOP       0
+
+#define WHEEL_COUNT      4
+
+#define WHEEL_DIAMETER_M          0.100f
+#define PI_VALUE                  3.1415926f
+#define WHEEL_CIRCUMFERENCE_M     (PI_VALUE * WHEEL_DIAMETER_M)
+
+#define ENCODER_PPR               11.0f
+#define GEAR_RATIO                30.0f
+#define ENCODER_MULTIPLIER        4.0f
+
+#define ENCODER_COUNT_PER_REV     (ENCODER_PPR * GEAR_RATIO * ENCODER_MULTIPLIER)
+#define METER_PER_COUNT           (WHEEL_CIRCUMFERENCE_M / ENCODER_COUNT_PER_REV)
+
+#define ENCODER_SAMPLE_TIME_MS    10
+#define ENCODER_SAMPLE_TIME_S     ((float)ENCODER_SAMPLE_TIME_MS / 1000.0f)
 
 /* USER CODE END PD */
 
@@ -45,16 +87,440 @@
 
 /* USER CODE BEGIN PV */
 
+/*
+  Motor 1 = Front Left  = banh truoc trai
+    LPWM PA8
+    RPWM PA9
+    EN   PC13
+    Encoder TIM2
+
+  Motor 2 = Front Right = banh truoc phai
+    LPWM PA10
+    RPWM PA11
+    EN   PC14
+    Encoder TIM3
+
+  Motor 3 = Rear Left = banh sau trai
+    LPWM PA2
+    RPWM PA3
+    EN   PC15
+    Encoder TIM4
+
+  Motor 4 = Rear Right = banh sau phai
+    LPWM PB8
+    RPWM PB9
+    EN   PB12
+    Encoder TIM5
+*/
+
+Motor_t motors[WHEEL_COUNT] =
+{
+  {
+    "M1_FRONT_LEFT",
+    GPIOA, GPIO_PIN_8,
+    GPIOA, GPIO_PIN_9,
+    GPIOC, GPIO_PIN_13,
+    &htim2,
+    0, 0, 0,
+    0.0f,
+    MOTOR_STOP
+  },
+
+  {
+    "M2_FRONT_RIGHT",
+    GPIOA, GPIO_PIN_10,
+    GPIOA, GPIO_PIN_11,
+    GPIOC, GPIO_PIN_14,
+    &htim3,
+    0, 0, 0,
+    0.0f,
+    MOTOR_STOP
+  },
+
+  {
+    "M3_REAR_LEFT",
+    GPIOA, GPIO_PIN_2,
+    GPIOA, GPIO_PIN_3,
+    GPIOC, GPIO_PIN_15,
+    &htim4,
+    0, 0, 0,
+    0.0f,
+    MOTOR_STOP
+  },
+
+  {
+    "M4_REAR_RIGHT",
+    GPIOB, GPIO_PIN_8,
+    GPIOB, GPIO_PIN_9,
+    GPIOB, GPIO_PIN_12,
+    &htim5,
+    0, 0, 0,
+    0.0f,
+    MOTOR_STOP
+  }
+};
+
+/*
+  Debug variables.
+  Them cac bien nay vao Live Expressions.
+*/
+
+volatile int32_t debug_delta_m1 = 0;
+volatile int32_t debug_delta_m2 = 0;
+volatile int32_t debug_delta_m3 = 0;
+volatile int32_t debug_delta_m4 = 0;
+
+volatile int64_t debug_total_m1 = 0;
+volatile int64_t debug_total_m2 = 0;
+volatile int64_t debug_total_m3 = 0;
+volatile int64_t debug_total_m4 = 0;
+
+volatile float debug_speed_m1 = 0.0f;
+volatile float debug_speed_m2 = 0.0f;
+volatile float debug_speed_m3 = 0.0f;
+volatile float debug_speed_m4 = 0.0f;
+
+volatile int debug_dir_m1 = MOTOR_STOP;
+volatile int debug_dir_m2 = MOTOR_STOP;
+volatile int debug_dir_m3 = MOTOR_STOP;
+volatile int debug_dir_m4 = MOTOR_STOP;
+
+uint32_t last_encoder_time = 0;
+uint32_t last_motion_time = 0;
+uint8_t motion_state = 0;
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
+
 /* USER CODE BEGIN PFP */
+
+/* Motor GPIO */
+void Motors_GPIO_Init(void);
+void Motor_Enable(Motor_t *motor);
+void Motor_Disable(Motor_t *motor);
+void Motor_SetDirection(Motor_t *motor, int direction);
+void Motors_SetDirectionAll(int direction);
+void Motors_StopAll(void);
+
+/* Encoder */
+void Encoders_InitAll(void);
+void Encoder_Reset(Motor_t *motor);
+int32_t Encoder_ReadDelta(Motor_t *motor);
+float Encoder_DeltaToMPS(int32_t delta);
+void Encoders_UpdateAll(void);
+
+/* Debug */
+void Debug_UpdateVariables(void);
+
+/* Motion test */
+void Motion_TestTask(void);
+
+/* App */
+void App_Init(void);
+void App_Task(void);
 
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+
+/* =========================
+   MOTOR GPIO FUNCTIONS
+   ========================= */
+
+void Motors_GPIO_Init(void)
+{
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
+
+  __HAL_RCC_GPIOA_CLK_ENABLE();
+  __HAL_RCC_GPIOB_CLK_ENABLE();
+  __HAL_RCC_GPIOC_CLK_ENABLE();
+
+  /*
+    GPIOA:
+    PA2, PA3, PA8, PA9, PA10, PA11
+  */
+  GPIO_InitStruct.Pin = GPIO_PIN_2 | GPIO_PIN_3 |
+                        GPIO_PIN_8 | GPIO_PIN_9 |
+                        GPIO_PIN_10 | GPIO_PIN_11;
+
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+  /*
+    GPIOB:
+    PB8, PB9, PB12
+  */
+  GPIO_InitStruct.Pin = GPIO_PIN_8 | GPIO_PIN_9 | GPIO_PIN_12;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+  /*
+    GPIOC:
+    PC13, PC14, PC15
+  */
+  GPIO_InitStruct.Pin = GPIO_PIN_13 | GPIO_PIN_14 | GPIO_PIN_15;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
+
+  Motors_StopAll();
+
+  for (int i = 0; i < WHEEL_COUNT; i++)
+  {
+    Motor_Enable(&motors[i]);
+  }
+}
+
+void Motor_Enable(Motor_t *motor)
+{
+  HAL_GPIO_WritePin(motor->en_port, motor->en_pin, GPIO_PIN_SET);
+}
+
+void Motor_Disable(Motor_t *motor)
+{
+  HAL_GPIO_WritePin(motor->en_port, motor->en_pin, GPIO_PIN_RESET);
+}
+
+void Motor_SetDirection(Motor_t *motor, int direction)
+{
+  Motor_Enable(motor);
+
+  motor->direction = direction;
+
+  if (direction == MOTOR_FORWARD)
+  {
+    HAL_GPIO_WritePin(motor->lpwm_port, motor->lpwm_pin, GPIO_PIN_SET);
+    HAL_GPIO_WritePin(motor->rpwm_port, motor->rpwm_pin, GPIO_PIN_RESET);
+  }
+  else if (direction == MOTOR_BACKWARD)
+  {
+    HAL_GPIO_WritePin(motor->lpwm_port, motor->lpwm_pin, GPIO_PIN_RESET);
+    HAL_GPIO_WritePin(motor->rpwm_port, motor->rpwm_pin, GPIO_PIN_SET);
+  }
+  else
+  {
+    HAL_GPIO_WritePin(motor->lpwm_port, motor->lpwm_pin, GPIO_PIN_RESET);
+    HAL_GPIO_WritePin(motor->rpwm_port, motor->rpwm_pin, GPIO_PIN_RESET);
+  }
+}
+
+void Motors_SetDirectionAll(int direction)
+{
+  for (int i = 0; i < WHEEL_COUNT; i++)
+  {
+    Motor_SetDirection(&motors[i], direction);
+  }
+}
+
+void Motors_StopAll(void)
+{
+  for (int i = 0; i < WHEEL_COUNT; i++)
+  {
+    Motor_SetDirection(&motors[i], MOTOR_STOP);
+  }
+}
+
+/* =========================
+   ENCODER FUNCTIONS
+   ========================= */
+
+void Encoders_InitAll(void)
+{
+  for (int i = 0; i < WHEEL_COUNT; i++)
+  {
+    HAL_TIM_Encoder_Start(motors[i].encoder_htim, TIM_CHANNEL_ALL);
+    Encoder_Reset(&motors[i]);
+  }
+}
+
+void Encoder_Reset(Motor_t *motor)
+{
+  __HAL_TIM_SET_COUNTER(motor->encoder_htim, 0);
+
+  motor->encoder_last_count = 0;
+  motor->encoder_delta = 0;
+  motor->encoder_total_count = 0;
+  motor->speed_mps = 0.0f;
+}
+
+int32_t Encoder_ReadDelta(Motor_t *motor)
+{
+  uint32_t now_count = __HAL_TIM_GET_COUNTER(motor->encoder_htim);
+  uint32_t arr = __HAL_TIM_GET_AUTORELOAD(motor->encoder_htim);
+
+  int64_t delta = (int64_t)now_count - (int64_t)motor->encoder_last_count;
+  uint64_t period = (uint64_t)arr + 1ULL;
+
+  /*
+    Xu ly tran counter.
+    TIM2/TIM5 co the la 32-bit.
+    TIM3/TIM4 thuong la 16-bit.
+  */
+  if (delta > (int64_t)(period / 2ULL))
+  {
+    delta -= (int64_t)period;
+  }
+  else if (delta < -(int64_t)(period / 2ULL))
+  {
+    delta += (int64_t)period;
+  }
+
+  motor->encoder_last_count = now_count;
+  motor->encoder_delta = (int32_t)delta;
+  motor->encoder_total_count += delta;
+
+  return motor->encoder_delta;
+}
+
+float Encoder_DeltaToMPS(int32_t delta)
+{
+  float distance_m = (float)delta * METER_PER_COUNT;
+  float speed_mps = distance_m / ENCODER_SAMPLE_TIME_S;
+
+  return speed_mps;
+}
+
+void Encoders_UpdateAll(void)
+{
+  for (int i = 0; i < WHEEL_COUNT; i++)
+  {
+    int32_t delta = Encoder_ReadDelta(&motors[i]);
+    motors[i].speed_mps = Encoder_DeltaToMPS(delta);
+  }
+}
+
+/* =========================
+   DEBUG FUNCTION
+   ========================= */
+
+void Debug_UpdateVariables(void)
+{
+  debug_delta_m1 = motors[0].encoder_delta;
+  debug_delta_m2 = motors[1].encoder_delta;
+  debug_delta_m3 = motors[2].encoder_delta;
+  debug_delta_m4 = motors[3].encoder_delta;
+
+  debug_total_m1 = motors[0].encoder_total_count;
+  debug_total_m2 = motors[1].encoder_total_count;
+  debug_total_m3 = motors[2].encoder_total_count;
+  debug_total_m4 = motors[3].encoder_total_count;
+
+  debug_speed_m1 = motors[0].speed_mps;
+  debug_speed_m2 = motors[1].speed_mps;
+  debug_speed_m3 = motors[2].speed_mps;
+  debug_speed_m4 = motors[3].speed_mps;
+
+  debug_dir_m1 = motors[0].direction;
+  debug_dir_m2 = motors[1].direction;
+  debug_dir_m3 = motors[2].direction;
+  debug_dir_m4 = motors[3].direction;
+}
+
+/* =========================
+   MOTION TEST TASK
+   ========================= */
+
+void Motion_TestTask(void)
+{
+  uint32_t now = HAL_GetTick();
+
+  switch (motion_state)
+  {
+    case 0:
+      /*
+        4 motor quay thuan 3 giay
+      */
+      Motors_SetDirectionAll(MOTOR_FORWARD);
+
+      if (now - last_motion_time >= 3000)
+      {
+        last_motion_time = now;
+        motion_state = 1;
+      }
+      break;
+
+    case 1:
+      /*
+        Dung 1 giay
+      */
+      Motors_StopAll();
+
+      if (now - last_motion_time >= 1000)
+      {
+        last_motion_time = now;
+        motion_state = 2;
+      }
+      break;
+
+    case 2:
+      /*
+        4 motor quay nguoc 3 giay
+      */
+      Motors_SetDirectionAll(MOTOR_BACKWARD);
+
+      if (now - last_motion_time >= 3000)
+      {
+        last_motion_time = now;
+        motion_state = 3;
+      }
+      break;
+
+    case 3:
+      /*
+        Dung 1 giay
+      */
+      Motors_StopAll();
+
+      if (now - last_motion_time >= 1000)
+      {
+        last_motion_time = now;
+        motion_state = 0;
+      }
+      break;
+
+    default:
+      motion_state = 0;
+      last_motion_time = now;
+      break;
+  }
+}
+
+/* =========================
+   APP FUNCTIONS
+   ========================= */
+
+void App_Init(void)
+{
+  Motors_GPIO_Init();
+  Encoders_InitAll();
+
+  last_encoder_time = HAL_GetTick();
+  last_motion_time = HAL_GetTick();
+  motion_state = 0;
+}
+
+void App_Task(void)
+{
+  uint32_t now = HAL_GetTick();
+
+  Motion_TestTask();
+
+  if (now - last_encoder_time >= ENCODER_SAMPLE_TIME_MS)
+  {
+    last_encoder_time = now;
+
+    Encoders_UpdateAll();
+    Debug_UpdateVariables();
+  }
+}
 
 /* USER CODE END 0 */
 
@@ -64,49 +530,70 @@ void SystemClock_Config(void);
   */
 int main(void)
 {
-
   /* USER CODE BEGIN 1 */
 
   /* USER CODE END 1 */
 
   /* MCU Configuration--------------------------------------------------------*/
 
-  /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
   HAL_Init();
 
   /* USER CODE BEGIN Init */
 
   /* USER CODE END Init */
 
-  /* Configure the system clock */
   SystemClock_Config();
 
   /* USER CODE BEGIN SysInit */
 
   /* USER CODE END SysInit */
 
-  /* Initialize all configured peripherals */
+  /*
+    Initialize all configured peripherals.
+  */
   MX_GPIO_Init();
-  MX_TIM1_Init();
+
+  /*
+    Encoder timers:
+    TIM2 = Encoder Motor 1
+    TIM3 = Encoder Motor 2
+    TIM4 = Encoder Motor 3
+    TIM5 = Encoder Motor 4
+  */
   MX_TIM2_Init();
   MX_TIM3_Init();
   MX_TIM4_Init();
   MX_TIM5_Init();
+
+  /*
+    PWM timers.
+    Code hien tai chua dung PWM, nhung van init duoc.
+  */
+  MX_TIM1_Init();
   MX_TIM9_Init();
   MX_TIM10_Init();
   MX_TIM11_Init();
+
   /* USER CODE BEGIN 2 */
+
+  App_Init();
 
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
+
   while (1)
   {
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+
+    App_Task();
+
+    /* USER CODE END 3 */
   }
+
   /* USER CODE END 3 */
 }
 
@@ -131,6 +618,7 @@ void SystemClock_Config(void)
   RCC_OscInitStruct.HSIState = RCC_HSI_ON;
   RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_NONE;
+
   if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
   {
     Error_Handler();
@@ -138,8 +626,9 @@ void SystemClock_Config(void)
 
   /** Initializes the CPU, AHB and APB buses clocks
   */
-  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
-                              |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
+  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_SYSCLK
+                              | RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2;
+
   RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_HSI;
   RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
   RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV1;
@@ -162,26 +651,27 @@ void SystemClock_Config(void)
 void Error_Handler(void)
 {
   /* USER CODE BEGIN Error_Handler_Debug */
-  /* User can add his own implementation to report the HAL error return state */
+
   __disable_irq();
+
   while (1)
   {
   }
+
   /* USER CODE END Error_Handler_Debug */
 }
+
 #ifdef USE_FULL_ASSERT
+
 /**
   * @brief  Reports the name of the source file and the source line number
   *         where the assert_param error has occurred.
-  * @param  file: pointer to the source file name
-  * @param  line: assert_param error line source number
-  * @retval None
   */
 void assert_failed(uint8_t *file, uint32_t line)
 {
   /* USER CODE BEGIN 6 */
-  /* User can add his own implementation to report the file name and line number,
-     ex: printf("Wrong parameters value: file %s on line %d\r\n", file, line) */
+
   /* USER CODE END 6 */
 }
+
 #endif /* USE_FULL_ASSERT */
