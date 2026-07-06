@@ -54,7 +54,7 @@ void MX_GPIO_Init(void)
   HAL_GPIO_WritePin(GPIOC, R_L_EN_M1_Pin|R_L_EN_M2_Pin|R_L_EN_M3_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(R_L_EN_M4_GPIO_Port, R_L_EN_M4_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOB, R_L_EN_M4_Pin|RS485_DE_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pins : R_L_EN_M1_Pin R_L_EN_M2_Pin R_L_EN_M3_Pin */
   GPIO_InitStruct.Pin = R_L_EN_M1_Pin|R_L_EN_M2_Pin|R_L_EN_M3_Pin;
@@ -63,12 +63,12 @@ void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
 
-  /*Configure GPIO pin : R_L_EN_M4_Pin */
-  GPIO_InitStruct.Pin = R_L_EN_M4_Pin;
+  /*Configure GPIO pins : R_L_EN_M4_Pin RS485_DE_Pin */
+  GPIO_InitStruct.Pin = R_L_EN_M4_Pin|RS485_DE_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(R_L_EN_M4_GPIO_Port, &GPIO_InitStruct);
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
 }
 
