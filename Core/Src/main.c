@@ -17,6 +17,9 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include <stdint.h>
+#include <string.h>
+#include <stdlib.h>
+
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -143,6 +146,13 @@ typedef struct
 
 #define TARGET_DEADBAND_MPS         0.02f
 #define TARGET_SPEED_LIMIT_MPS      2.0f
+#define UART_CMD_BUFFER_SIZE        64
+
+/*
+  Khi test bằng tay qua minicom nên để 3000 ms.
+  Sau này Raspberry Pi gửi liên tục thì giảm xuống 500 ms.
+*/
+#define UART_WATCHDOG_TIMEOUT_MS    3000
 
 /* USER CODE END PD */
 
@@ -319,6 +329,24 @@ Motor_t motors[MOTOR_COUNT] =
 uint32_t last_control_time = 0;
 uint32_t last_motion_time = 0;
 uint8_t motion_state = 0;
+/* ===== UART / RS485 AUTO-DIRECTION MODULE ===== */
+
+uint8_t uart_rx_byte = 0;
+char uart_cmd_buffer[UART_CMD_BUFFER_SIZE];
+uint8_t uart_cmd_index = 0;
+
+volatile uint8_t uart_cmd_ready = 0;
+volatile uint32_t last_uart_cmd_time = 0;
+
+volatile float uart_target_m1 = 0.0f;
+volatile float uart_target_m2 = 0.0f;
+volatile float uart_target_m3 = 0.0f;
+volatile float uart_target_m4 = 0.0f;
+
+volatile int debug_uart_rx_count = 0;
+volatile int debug_uart_parse_ok = 0;
+volatile int debug_uart_parse_fail = 0;
+volatile int debug_uart_watchdog = 0;
 
 /* USER CODE END PV */
 
@@ -366,6 +394,12 @@ void Motion_Speed_TestTask(void);
 /* App */
 void App_Init(void);
 void App_Task(void);
+
+/* UART / RS485 */
+void UART_StartReceive_IT(void);
+void UART_ProcessCommand(void);
+void UART_WatchdogTask(void);
+void UART_SendString(const char *msg);
 
 /* USER CODE END PFP */
 
@@ -889,6 +923,149 @@ void Motion_Speed_TestTask(void)
       break;
   }
 }
+/* =========================
+   UART / RS485 FUNCTIONS
+   Module RS485 TTL auto-direction
+   ========================= */
+
+void UART_SendString(const char *msg)
+{
+  HAL_UART_Transmit(&huart1, (uint8_t *)msg, strlen(msg), 100);
+}
+
+void UART_StartReceive_IT(void)
+{
+  HAL_UART_Receive_IT(&huart1, &uart_rx_byte, 1);
+}
+
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+  if (huart->Instance == USART1)
+  {
+    debug_uart_rx_count++;
+
+    if (uart_cmd_ready == 0)
+    {
+      if (uart_rx_byte == '\n' || uart_rx_byte == '\r')
+      {
+        if (uart_cmd_index > 0)
+        {
+          uart_cmd_buffer[uart_cmd_index] = '\0';
+          uart_cmd_ready = 1;
+          uart_cmd_index = 0;
+        }
+      }
+      else
+      {
+        if (uart_cmd_index < UART_CMD_BUFFER_SIZE - 1)
+        {
+          uart_cmd_buffer[uart_cmd_index++] = (char)uart_rx_byte;
+        }
+        else
+        {
+          uart_cmd_index = 0;
+          debug_uart_parse_fail++;
+        }
+      }
+    }
+
+    HAL_UART_Receive_IT(&huart1, &uart_rx_byte, 1);
+  }
+}
+
+static int UART_ParseVelocityCommand(char *cmd, float *m1, float *m2, float *m3, float *m4)
+{
+  char *p = cmd;
+  char *end;
+
+  while (*p == ' ')
+  {
+    p++;
+  }
+
+  if (*p != 'V' && *p != 'v')
+  {
+    return 0;
+  }
+
+  p++;
+
+  *m1 = strtof(p, &end);
+  if (end == p) return 0;
+  p = end;
+
+  *m2 = strtof(p, &end);
+  if (end == p) return 0;
+  p = end;
+
+  *m3 = strtof(p, &end);
+  if (end == p) return 0;
+  p = end;
+
+  *m4 = strtof(p, &end);
+  if (end == p) return 0;
+
+  return 1;
+}
+
+void UART_ProcessCommand(void)
+{
+  if (uart_cmd_ready == 0)
+  {
+    return;
+  }
+
+  uart_cmd_ready = 0;
+
+  float m1 = 0.0f;
+  float m2 = 0.0f;
+  float m3 = 0.0f;
+  float m4 = 0.0f;
+
+  /*
+    Format lệnh:
+    V m1 m2 m3 m4
+
+    Ví dụ:
+    V 0.2 0.2 0.2 0.2
+    V 0 0 0 0
+    V 0.2 -0.2 -0.2 0.2
+  */
+  if (UART_ParseVelocityCommand(uart_cmd_buffer, &m1, &m2, &m3, &m4))
+  {
+    uart_target_m1 = m1;
+    uart_target_m2 = m2;
+    uart_target_m3 = m3;
+    uart_target_m4 = m4;
+
+    Motors_SetTargetSpeeds(m1, m2, m3, m4);
+
+    last_uart_cmd_time = HAL_GetTick();
+    debug_uart_parse_ok++;
+
+    UART_SendString("OK\r\n");
+  }
+  else
+  {
+    debug_uart_parse_fail++;
+    UART_SendString("ERR\r\n");
+  }
+}
+
+void UART_WatchdogTask(void)
+{
+  uint32_t now = HAL_GetTick();
+
+  if (now - last_uart_cmd_time > UART_WATCHDOG_TIMEOUT_MS)
+  {
+    Motors_SetTargetSpeeds(0.0f, 0.0f, 0.0f, 0.0f);
+    debug_uart_watchdog = 1;
+  }
+  else
+  {
+    debug_uart_watchdog = 0;
+  }
+}
 
 /* =========================
    APP FUNCTIONS
@@ -910,6 +1087,9 @@ void App_Init(void)
   last_motion_time = HAL_GetTick();
   motion_state = 0;
 
+  last_uart_cmd_time = HAL_GetTick();
+  UART_StartReceive_IT();
+
   Debug_UpdateVariables();
 }
 
@@ -917,7 +1097,14 @@ void App_Task(void)
 {
   uint32_t now = HAL_GetTick();
 
-  Motion_Speed_TestTask();
+  /*
+    Không chạy test tự động nữa.
+    Target speed sẽ nhận từ UART/RS485.
+  */
+  // Motion_Speed_TestTask();
+
+  UART_ProcessCommand();
+  UART_WatchdogTask();
 
   if (now - last_control_time >= CONTROL_PERIOD_MS)
   {
@@ -970,7 +1157,6 @@ int main(void)
   MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
 
-  HAL_GPIO_WritePin(RS485_DE_GPIO_Port, RS485_DE_Pin, GPIO_PIN_RESET);
   App_Init();
 
   /* USER CODE END 2 */
