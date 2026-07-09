@@ -277,8 +277,8 @@ Motor_t motors[MOTOR_COUNT] =
     &htim1, TIM_CHANNEL_4,
     GPIOC, GPIO_PIN_14,
     &htim3,
-    MOTOR_NORMAL,
-    ENCODER_INVERT,
+	MOTOR_INVERT,
+	ENCODER_NORMAL,
     0,
     PWM_MIN_RUN_M2,
     0, 0, 0,
@@ -313,8 +313,8 @@ Motor_t motors[MOTOR_COUNT] =
     &htim11, TIM_CHANNEL_1,
     GPIOB, GPIO_PIN_12,
     &htim5,
-    MOTOR_NORMAL,
-    ENCODER_INVERT,
+	MOTOR_INVERT,
+	ENCODER_NORMAL,
     0,
     PWM_MIN_RUN_DEFAULT,
     0, 0, 0,
@@ -1173,9 +1173,7 @@ int main(void)
 
     /* USER CODE END 3 */
   }
-
-  /* đóng hàm main */
-  }
+}
 
 /**
   * @brief System Clock Configuration
