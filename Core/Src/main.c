@@ -90,8 +90,8 @@ typedef struct
   PWM tối thiểu để thắng ma sát tĩnh.
   Nếu motor vẫn bị ì, tăng lên 220 hoặc 250.
 */
-#define PWM_MIN_RUN_DEFAULT         190
-#define PWM_MIN_RUN_M2              230
+#define PWM_MIN_RUN_DEFAULT         60
+#define PWM_MIN_RUN_M2              60
 
 #define CONTROL_PERIOD_MS           10
 #define CONTROL_PERIOD_S            ((float)CONTROL_PERIOD_MS / 1000.0f)
@@ -102,7 +102,10 @@ typedef struct
   1.5 m/s^2 nghĩa là từ 0 lên 0.5 m/s mất khoảng 0.33s.
 */
 #define TARGET_ACCEL_LIMIT_MPS2     1.5f
-#define TARGET_RAMP_STEP_MPS        (TARGET_ACCEL_LIMIT_MPS2 * CONTROL_PERIOD_S)
+
+#define TARGET_ACCEL_LIMIT_MPS2     0.4f
+#define TARGET_RAMP_STEP_MPS \
+  (TARGET_ACCEL_LIMIT_MPS2 * CONTROL_PERIOD_S)
 
 /*
   Lọc tốc độ encoder.
@@ -115,7 +118,7 @@ typedef struct
   Thông số bánh + encoder.
   Nếu motor của bạn là hộp số 1:90 thì đổi GEAR_RATIO thành 90.0f.
 */
-#define WHEEL_DIAMETER_M            0.100f
+#define WHEEL_DIAMETER_M            0.097f
 #define PI_VALUE                    3.1415926f
 #define WHEEL_CIRCUMFERENCE_M       (PI_VALUE * WHEEL_DIAMETER_M)
 
@@ -130,13 +133,12 @@ typedef struct
   PID bản mượt hơn.
   Bản cũ 120/60 dễ làm motor giật hoặc dao động.
 */
-#define PID_KP                      80.0f
-#define PID_KI                      25.0f
+#define PID_KP                      50.0f
+#define PID_KI                      10.0f
 #define PID_KD                      0.0f
 
-#define PID_INTEGRAL_LIMIT          3.0f
-#define PID_OUTPUT_LIMIT            450.0f
-
+#define PID_INTEGRAL_LIMIT          2.0f
+#define PID_OUTPUT_LIMIT            250.0f
 /*
   Feedforward.
   Nếu motor lên tốc độ quá chậm, tăng PWM_PER_MPS lên 360.
@@ -146,13 +148,31 @@ typedef struct
 
 #define TARGET_DEADBAND_MPS         0.02f
 #define TARGET_SPEED_LIMIT_MPS      2.0f
-#define UART_CMD_BUFFER_SIZE        64
 
+#define UART_HEADER_1               0xAA
+#define UART_HEADER_2               0x55
+#define UART_FRAME_SIZE             11   //kích thước frame
+
+#define UART_HEADER_1                  0xAA
+#define UART_HEADER_2                  0x55
+#define UART_FRAME_SIZE                11
+
+#define UART_FEEDBACK_HEADER_1         0xAB
+#define UART_FEEDBACK_HEADER_2         0xCD
+#define UART_FEEDBACK_FRAME_SIZE       11
+#define UART_TX_TIMEOUT_MS             5
+
+#define UART_WATCHDOG_TIMEOUT_MS       500
+volatile uint8_t uart_feedback_pending = 0;
+
+volatile int debug_uart_tx_ok = 0;
+volatile int debug_uart_tx_fail = 0;
 /*
-  Khi test bằng tay qua minicom nên để 3000 ms.
-  Sau này Raspberry Pi gửi liên tục thì giảm xuống 500 ms.
+  ROS2 gửi frame mỗi 20 ms.
+  Nếu mất lệnh quá 500 ms thì dừng motor.
 */
-#define UART_WATCHDOG_TIMEOUT_MS    3000
+#define UART_WATCHDOG_TIMEOUT_MS    500
+
 
 /* USER CODE END PD */
 
@@ -260,7 +280,7 @@ Motor_t motors[MOTOR_COUNT] =
     GPIOC, GPIO_PIN_13,
     &htim2,
     MOTOR_NORMAL,
-    ENCODER_INVERT,
+	ENCODER_NORMAL,
     0,
     PWM_MIN_RUN_DEFAULT,
     0, 0, 0,
@@ -278,7 +298,7 @@ Motor_t motors[MOTOR_COUNT] =
     GPIOC, GPIO_PIN_14,
     &htim3,
 	MOTOR_INVERT,
-	ENCODER_NORMAL,
+	ENCODER_INVERT,
     0,
     PWM_MIN_RUN_M2,
     0, 0, 0,
@@ -295,8 +315,8 @@ Motor_t motors[MOTOR_COUNT] =
     &htim9, TIM_CHANNEL_2,
     GPIOC, GPIO_PIN_15,
     &htim4,
-    MOTOR_NORMAL,
-    ENCODER_INVERT,
+	MOTOR_NORMAL,
+	ENCODER_NORMAL,
     0,
     PWM_MIN_RUN_DEFAULT,
     0, 0, 0,
@@ -314,7 +334,7 @@ Motor_t motors[MOTOR_COUNT] =
     GPIOB, GPIO_PIN_12,
     &htim5,
 	MOTOR_INVERT,
-	ENCODER_NORMAL,
+	ENCODER_INVERT,
     0,
     PWM_MIN_RUN_DEFAULT,
     0, 0, 0,
@@ -331,11 +351,14 @@ uint32_t last_motion_time = 0;
 uint8_t motion_state = 0;
 /* ===== UART / RS485 AUTO-DIRECTION MODULE ===== */
 
-uint8_t uart_rx_byte = 0;
-char uart_cmd_buffer[UART_CMD_BUFFER_SIZE];
-uint8_t uart_cmd_index = 0;
+/* ===== UART BINARY FRAME ===== */
 
-volatile uint8_t uart_cmd_ready = 0;
+uint8_t uart_rx_byte = 0;
+
+uint8_t uart_rx_frame[UART_FRAME_SIZE];
+volatile uint8_t uart_rx_index = 0;
+volatile uint8_t uart_frame_ready = 0;
+
 volatile uint32_t last_uart_cmd_time = 0;
 
 volatile float uart_target_m1 = 0.0f;
@@ -346,6 +369,8 @@ volatile float uart_target_m4 = 0.0f;
 volatile int debug_uart_rx_count = 0;
 volatile int debug_uart_parse_ok = 0;
 volatile int debug_uart_parse_fail = 0;
+volatile int debug_uart_crc_fail = 0;
+volatile int debug_uart_error_count = 0;
 volatile int debug_uart_watchdog = 0;
 
 /* USER CODE END PV */
@@ -399,8 +424,11 @@ void App_Task(void);
 void UART_StartReceive_IT(void);
 void UART_ProcessCommand(void);
 void UART_WatchdogTask(void);
-void UART_SendString(const char *msg);
 
+static uint8_t UART_CalculateCRC(
+  const uint8_t *data,
+  uint8_t length
+);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -655,6 +683,23 @@ void Encoders_UpdateAll(void)
                           (motors[i].speed_raw_mps - motors[i].speed_mps);
   }
 }
+
+/*
+  Binary frame 11 bytes:
+
+  [0xAA][0x55]
+  [v1_L][v1_H]
+  [v2_L][v2_H]
+  [v3_L][v3_H]
+  [v4_L][v4_H]
+  [CRC]
+
+  v1...v4:
+  int16_t, đơn vị mm/s, little-endian
+
+  CRC:
+  XOR byte 0 đến byte 9
+*/
 
 /* =========================
    PID FUNCTIONS
@@ -923,142 +968,464 @@ void Motion_Speed_TestTask(void)
       break;
   }
 }
-/* =========================
-   UART / RS485 FUNCTIONS
-   Module RS485 TTL auto-direction
-   ========================= */
 
-void UART_SendString(const char *msg)
+/*
+  UART / RS485 binary frame 11 bytes:
+
+  Byte 0:  0xAA
+  Byte 1:  0x55
+
+  Byte 2:  v1 low
+  Byte 3:  v1 high
+
+  Byte 4:  v2 low
+  Byte 5:  v2 high
+
+  Byte 6:  v3 low
+  Byte 7:  v3 high
+
+  Byte 8:  v4 low
+  Byte 9:  v4 high
+
+  Byte 10: CRC XOR byte 0 đến byte 9
+
+  v1...v4:
+  int16_t, đơn vị mm/s
+*/
+
+static uint8_t UART_CalculateCRC(
+  const uint8_t *data,
+  uint8_t length
+)
 {
-  HAL_UART_Transmit(&huart1, (uint8_t *)msg, strlen(msg), 100);
+  uint8_t crc = 0;
+
+  for (uint8_t i = 0; i < length; i++)
+  {
+    crc ^= data[i];
+  }
+
+  return crc;
 }
+
+static int16_t UART_MpsToMmps(
+  float speed_mps
+)
+{
+  float scaled = speed_mps * 1000.0f;
+
+  int32_t value;
+
+  /*
+    Làm tròn sang số nguyên gần nhất.
+  */
+  if (scaled >= 0.0f)
+  {
+    value = (int32_t)(scaled + 0.5f);
+  }
+  else
+  {
+    value = (int32_t)(scaled - 0.5f);
+  }
+
+  /*
+    Giới hạn theo int16_t.
+  */
+  if (value > 32767)
+  {
+    value = 32767;
+  }
+  else if (value < -32768)
+  {
+    value = -32768;
+  }
+
+  return (int16_t)value;
+}
+
+
+static void UART_PackInt16LE(
+  uint8_t *destination,
+  int16_t value
+)
+{
+  uint16_t raw = (uint16_t)value;
+
+  destination[0] =
+    (uint8_t)(raw & 0x00FFU);
+
+  destination[1] =
+    (uint8_t)((raw >> 8U) & 0x00FFU);
+}
+
+void UART_SendFeedback(void)
+{
+  uint8_t frame[UART_FEEDBACK_FRAME_SIZE];
+
+  /*
+    Tốc độ encoder thực tế của bốn bánh.
+  */
+  int16_t speed1_mmps =
+    UART_MpsToMmps(motors[0].speed_mps);
+
+  int16_t speed2_mmps =
+    UART_MpsToMmps(motors[1].speed_mps);
+
+  int16_t speed3_mmps =
+    UART_MpsToMmps(motors[2].speed_mps);
+
+  int16_t speed4_mmps =
+    UART_MpsToMmps(motors[3].speed_mps);
+
+  frame[0] = UART_FEEDBACK_HEADER_1;
+  frame[1] = UART_FEEDBACK_HEADER_2;
+
+  UART_PackInt16LE(
+    &frame[2],
+    speed1_mmps
+  );
+
+  UART_PackInt16LE(
+    &frame[4],
+    speed2_mmps
+  );
+
+  UART_PackInt16LE(
+    &frame[6],
+    speed3_mmps
+  );
+
+  UART_PackInt16LE(
+    &frame[8],
+    speed4_mmps
+  );
+
+  /*
+    CRC XOR của 10 byte đầu.
+  */
+  frame[10] =
+    UART_CalculateCRC(
+      frame,
+      10
+    );
+
+  /*
+    Module RS485 của bạn là auto-direction,
+    nên không cần bật/tắt chân DE ở đây.
+  */
+  HAL_StatusTypeDef status =
+    HAL_UART_Transmit(
+      &huart1,
+      frame,
+      UART_FEEDBACK_FRAME_SIZE,
+      UART_TX_TIMEOUT_MS
+    );
+
+  if (status == HAL_OK)
+  {
+    debug_uart_tx_ok++;
+  }
+  else
+  {
+    debug_uart_tx_fail++;
+  }
+}
+
+void UART_SendFeedback(void);
+
+static int16_t UART_MpsToMmps(
+  float speed_mps
+);
+
+static void UART_PackInt16LE(
+  uint8_t *destination,
+  int16_t value
+);
 
 void UART_StartReceive_IT(void)
 {
-  HAL_UART_Receive_IT(&huart1, &uart_rx_byte, 1);
+  uart_rx_index = 0;
+  uart_frame_ready = 0;
+
+  if (HAL_UART_Receive_IT(
+        &huart1,
+        &uart_rx_byte,
+        1
+      ) != HAL_OK)
+  {
+    debug_uart_error_count++;
+  }
 }
 
-void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+
+/*
+  Callback chạy mỗi khi USART1 nhận được 1 byte.
+  Hàm tìm header AA 55 rồi thu đủ 11 byte.
+*/
+void HAL_UART_RxCpltCallback(
+  UART_HandleTypeDef *huart
+)
 {
   if (huart->Instance == USART1)
   {
     debug_uart_rx_count++;
 
-    if (uart_cmd_ready == 0)
+    /*
+      Khi frame trước chưa được xử lý,
+      không ghi đè lên buffer.
+    */
+    if (uart_frame_ready == 0)
     {
-      if (uart_rx_byte == '\n' || uart_rx_byte == '\r')
+      switch (uart_rx_index)
       {
-        if (uart_cmd_index > 0)
-        {
-          uart_cmd_buffer[uart_cmd_index] = '\0';
-          uart_cmd_ready = 1;
-          uart_cmd_index = 0;
-        }
-      }
-      else
-      {
-        if (uart_cmd_index < UART_CMD_BUFFER_SIZE - 1)
-        {
-          uart_cmd_buffer[uart_cmd_index++] = (char)uart_rx_byte;
-        }
-        else
-        {
-          uart_cmd_index = 0;
-          debug_uart_parse_fail++;
-        }
+        case 0:
+          /*
+            Chờ byte đầu tiên 0xAA.
+          */
+          if (uart_rx_byte == UART_HEADER_1)
+          {
+            uart_rx_frame[0] = uart_rx_byte;
+            uart_rx_index = 1;
+          }
+          break;
+
+        case 1:
+          /*
+            Chờ byte thứ hai 0x55.
+          */
+          if (uart_rx_byte == UART_HEADER_2)
+          {
+            uart_rx_frame[1] = uart_rx_byte;
+            uart_rx_index = 2;
+          }
+          else if (uart_rx_byte == UART_HEADER_1)
+          {
+            /*
+              Trường hợp nhận AA AA 55:
+              giữ AA mới làm header đầu.
+            */
+            uart_rx_frame[0] = UART_HEADER_1;
+            uart_rx_index = 1;
+          }
+          else
+          {
+            uart_rx_index = 0;
+          }
+          break;
+
+        default:
+          /*
+            Nhận v1, v2, v3, v4 và CRC.
+          */
+          uart_rx_frame[uart_rx_index] =
+            uart_rx_byte;
+
+          uart_rx_index++;
+
+          if (uart_rx_index >= UART_FRAME_SIZE)
+          {
+            uart_rx_index = 0;
+            uart_frame_ready = 1;
+          }
+          break;
       }
     }
 
-    HAL_UART_Receive_IT(&huart1, &uart_rx_byte, 1);
+    /*
+      Luôn bật lại nhận interrupt byte tiếp theo.
+    */
+    if (HAL_UART_Receive_IT(
+          &huart1,
+          &uart_rx_byte,
+          1
+        ) != HAL_OK)
+    {
+      debug_uart_error_count++;
+    }
   }
 }
 
-static int UART_ParseVelocityCommand(char *cmd, float *m1, float *m2, float *m3, float *m4)
+void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
 {
-  char *p = cmd;
-  char *end;
-
-  while (*p == ' ')
+  if (huart->Instance == USART1)
   {
-    p++;
+    debug_uart_error_count++;
+
+    /*
+      Xóa frame đang nhận dở.
+    */
+    uart_rx_index = 0;
+    uart_frame_ready = 0;
+
+    /*
+      Dừng lần nhận UART hiện tại.
+    */
+    HAL_UART_AbortReceive(huart);
+
+    /*
+      Xóa cờ UART Overrun.
+    */
+    __HAL_UART_CLEAR_OREFLAG(huart);
+
+    /*
+      Bắt đầu nhận lại 1 byte.
+    */
+    if (HAL_UART_Receive_IT(
+          &huart1,
+          &uart_rx_byte,
+          1
+        ) != HAL_OK)
+    {
+      debug_uart_error_count++;
+    }
   }
-
-  if (*p != 'V' && *p != 'v')
-  {
-    return 0;
-  }
-
-  p++;
-
-  *m1 = strtof(p, &end);
-  if (end == p) return 0;
-  p = end;
-
-  *m2 = strtof(p, &end);
-  if (end == p) return 0;
-  p = end;
-
-  *m3 = strtof(p, &end);
-  if (end == p) return 0;
-  p = end;
-
-  *m4 = strtof(p, &end);
-  if (end == p) return 0;
-
-  return 1;
 }
-
+/*
+  Xử lý frame trong vòng lặp chính,
+  không chạy PID hay parse float trong interrupt.
+*/
 void UART_ProcessCommand(void)
 {
-  if (uart_cmd_ready == 0)
+  if (uart_frame_ready == 0)
   {
     return;
   }
 
-  uart_cmd_ready = 0;
-
-  float m1 = 0.0f;
-  float m2 = 0.0f;
-  float m3 = 0.0f;
-  float m4 = 0.0f;
+  uint8_t frame[UART_FRAME_SIZE];
 
   /*
-    Format lệnh:
-    V m1 m2 m3 m4
-
-    Ví dụ:
-    V 0.2 0.2 0.2 0.2
-    V 0 0 0 0
-    V 0.2 -0.2 -0.2 0.2
+    Copy frame ra biến cục bộ để ISR không ghi đè.
   */
-  if (UART_ParseVelocityCommand(uart_cmd_buffer, &m1, &m2, &m3, &m4))
-  {
-    uart_target_m1 = m1;
-    uart_target_m2 = m2;
-    uart_target_m3 = m3;
-    uart_target_m4 = m4;
+  __disable_irq();
 
-    Motors_SetTargetSpeeds(m1, m2, m3, m4);
+  memcpy(
+    frame,
+    uart_rx_frame,
+    UART_FRAME_SIZE
+  );
 
-    last_uart_cmd_time = HAL_GetTick();
-    debug_uart_parse_ok++;
+  uart_frame_ready = 0;
 
-    UART_SendString("OK\r\n");
-  }
-  else
+  __enable_irq();
+
+  /*
+    Kiểm tra lại header.
+  */
+  if (frame[0] != UART_HEADER_1 ||
+      frame[1] != UART_HEADER_2)
   {
     debug_uart_parse_fail++;
-    UART_SendString("ERR\r\n");
+    return;
   }
+
+  /*
+    CRC nhận được nằm ở byte 6.
+    CRC tính lại từ byte 0 đến byte 5.
+  */
+  uint8_t received_crc = frame[10];
+
+  uint8_t calculated_crc =
+    UART_CalculateCRC(frame, 10);
+
+  if (received_crc != calculated_crc)
+  {
+    debug_uart_crc_fail++;
+    debug_uart_parse_fail++;
+    return;
+  }
+
+  /*
+    Ghép hai byte little-endian thành int16_t.
+
+    Ví dụ:
+    +500 mm/s = 0x01F4
+    Low byte  = 0xF4
+    High byte = 0x01
+
+    -500 mm/s = 0xFE0C
+    Low byte  = 0x0C
+    High byte = 0xFE
+  */
+  int16_t speed1_mmps =
+    (int16_t)(
+      (uint16_t)frame[2] |
+      ((uint16_t)frame[3] << 8)
+    );
+
+  int16_t speed2_mmps =
+    (int16_t)(
+      (uint16_t)frame[4] |
+      ((uint16_t)frame[5] << 8)
+    );
+
+  int16_t speed3_mmps =
+    (int16_t)(
+      (uint16_t)frame[6] |
+      ((uint16_t)frame[7] << 8)
+    );
+
+  int16_t speed4_mmps =
+    (int16_t)(
+      (uint16_t)frame[8] |
+      ((uint16_t)frame[9] << 8)
+    );
+  /*
+    Đổi mm/s thành m/s.
+  */
+  float m1 = (float)speed1_mmps / 1000.0f;
+  float m2 = (float)speed2_mmps / 1000.0f;
+  float m3 = (float)speed3_mmps / 1000.0f;
+  float m4 = (float)speed4_mmps / 1000.0f;
+
+  uart_target_m1 = m1;
+  uart_target_m2 = m2;
+  uart_target_m3 = m3;
+  uart_target_m4 = m4;
+
+  /*
+    Đưa tốc độ mục tiêu vào PID.
+  */
+  Motors_SetTargetSpeeds(
+    m1,
+    m2,
+    m3,
+    m4
+  );
+
+  /*
+    Chỉ reset watchdog khi frame đúng header và CRC.
+  */
+  last_uart_cmd_time = HAL_GetTick();
+
+  debug_uart_parse_ok++;
+  debug_uart_watchdog = 0;
+  /*
+    Yêu cầu gửi lại tốc độ encoder về ROS2.
+  */
+  uart_feedback_pending = 1;
 }
 
 void UART_WatchdogTask(void)
 {
   uint32_t now = HAL_GetTick();
 
-  if (now - last_uart_cmd_time > UART_WATCHDOG_TIMEOUT_MS)
+  if ((now - last_uart_cmd_time) >
+      UART_WATCHDOG_TIMEOUT_MS)
   {
-    Motors_SetTargetSpeeds(0.0f, 0.0f, 0.0f, 0.0f);
+    /*
+      Chỉ thực hiện dừng một lần
+      khi watchdog vừa kích hoạt.
+    */
+    if (debug_uart_watchdog == 0)
+    {
+      Motors_StopAll();
+
+      uart_target_m1 = 0.0f;
+      uart_target_m2 = 0.0f;
+      uart_target_m3 = 0.0f;
+      uart_target_m4 = 0.0f;
+    }
+
     debug_uart_watchdog = 1;
   }
   else
@@ -1098,20 +1465,35 @@ void App_Task(void)
   uint32_t now = HAL_GetTick();
 
   /*
-    Không chạy test tự động nữa.
-    Target speed sẽ nhận từ UART/RS485.
+    Nhận và xử lý frame ROS2.
   */
-  // Motion_Speed_TestTask();
-
   UART_ProcessCommand();
+
+  /*
+    Kiểm tra mất kết nối.
+  */
   UART_WatchdogTask();
 
+  /*
+    Điều khiển motor và cập nhật tốc độ encoder.
+  */
   if (now - last_control_time >= CONTROL_PERIOD_MS)
   {
     last_control_time = now;
 
     Motors_ControlUpdateAll();
     Debug_UpdateVariables();
+  }
+
+  /*
+    Sau khi nhận được một frame lệnh hợp lệ,
+    gửi tốc độ encoder mới nhất về ROS2.
+  */
+  if (uart_feedback_pending != 0)
+  {
+    uart_feedback_pending = 0;
+
+    UART_SendFeedback();
   }
 }
 
@@ -1170,9 +1552,9 @@ int main(void)
     /* USER CODE BEGIN 3 */
 
     App_Task();
-
-    /* USER CODE END 3 */
   }
+
+  /* USER CODE END 3 */
 }
 
 /**
